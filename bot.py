@@ -11,13 +11,13 @@ from telebot import types
 from datetime import datetime, timedelta
 
 # ================= CONFIG =================
-TOKEN          = os.getenv("BOT_TOKEN")  # Token lấy từ Environment Variables
+TOKEN          = os.getenv("BOT_TOKEN")
 ADMIN_USERNAME = "Minhlecutephomaique"
 API_URL        = "https://wtxmd52.tele68.com/v1/txmd5/sessions"
 PROXY          = "https://api.allorigins.win/raw?url="
 DB_FILE        = "bot_data.db"
 BRAND          = "LE MINH TOOL — TOOL LÀM GIÀU KIẾM LÚA 🦀"
-CHECK_INTERVAL = 60
+CHECK_INTERVAL = 30
 IMAGE_URL      = "https://raw.githubusercontent.com/sumindznhat-ari/minhdzle/main/vietqr.jpg"
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
@@ -50,8 +50,12 @@ def init_db():
     c.execute("""CREATE TABLE IF NOT EXISTS history(
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id      INTEGER,
+        session_id   INTEGER,
         prediction   TEXT,
         confidence   REAL,
+        actual       TEXT,
+        is_correct   INTEGER DEFAULT -1,
+        notified     INTEGER DEFAULT 0,
         created_at   TEXT
     )""")
     conn.commit(); conn.close()
@@ -136,7 +140,7 @@ def grant_key(uid, hours):
     conn.commit(); conn.close()
     return exp
 
-def ban_user(uid): 
+def ban_user(uid):
     conn = db(); c = conn.cursor()
     c.execute("UPDATE users SET is_banned=1 WHERE user_id=?", (uid,))
     conn.commit(); conn.close()
@@ -149,8 +153,9 @@ def unban_user(uid):
 def gen_key_code():
     return "key" + hashlib.md5(os.urandom(8)).hexdigest()[:10]
 
-# ================= BACKGROUND WATCHER =================
+# ================= BACKGROUND WATCHER (KEY + PHIÊN) =================
 def key_watcher():
+    """Báo key hết hạn"""
     while True:
         try:
             conn = db(); c = conn.cursor()
@@ -168,8 +173,7 @@ def key_watcher():
                         "🔒 <b>KEY KHÔNG CÒN HOẠT ĐỘNG</b>\n"
                         "━━━━━━━━━━━━━━━━━━\n"
                         "⏰ Key của bạn đã <b>hết hạn</b>.\n"
-                        "Vui lòng nạp tiền gia hạn để tiếp tục dùng tool.\n\n"
-                        f"💰 Gõ /nap để xem bảng giá\n"
+                        f"💰 Gõ /nap để gia hạn\n"
                         f"☎️ Admin: @{ADMIN_USERNAME}")
                 except Exception as e:
                     print(f"[watcher] Lỗi gửi tin {uid}: {e}")
@@ -178,7 +182,60 @@ def key_watcher():
             conn.commit(); conn.close()
         except Exception as e:
             print(f"[watcher] Lỗi: {e}")
+        time.sleep(60)
+
+def session_watcher():
+    """
+    Chạy nền: mỗi 30s kiểm tra API.
+    Khi có phiên mới kết thúc → so sánh với dự đoán đã lưu → báo đúng/sai.
+    """
+    last_session_id = None
+    while True:
+        try:
+            data = fetch_history()
+            if data and data.get("list"):
+                newest = data["list"][0]
+                sid = newest["id"]
+                actual = newest["resultTruyenThong"]  # TAI hoặc XIU
+
+                if last_session_id is None:
+                    last_session_id = sid
+                elif sid > last_session_id:
+                    # Có phiên mới → xử lý tất cả các phiên đã bỏ lỡ
+                    new_sessions = [x for x in data["list"] if last_session_id < x["id"] <= sid]
+                    for s in new_sessions:
+                        process_session_result(s["id"], s["resultTruyenThong"])
+                    last_session_id = sid
+        except Exception as e:
+            print(f"[session_watcher] Lỗi: {e}")
         time.sleep(CHECK_INTERVAL)
+
+def process_session_result(session_id, actual):
+    """So sánh dự đoán đã lưu với kết quả thực tế, gửi thông báo cho user."""
+    conn = db(); c = conn.cursor()
+    c.execute("""SELECT id, user_id, prediction, confidence FROM history
+                 WHERE session_id=? AND actual IS NULL AND notified=0""", (session_id,))
+    rows = c.fetchall()
+
+    for r in rows:
+        uid = r["user_id"]
+        pred = r["prediction"]
+        conf = r["confidence"]
+        is_correct = 1 if pred == actual else 0
+        try:
+            bot.send_message(uid,
+                f"🦀 <b>KẾT QUẢ PHIÊN #{session_id}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🎲 Thực tế: <b>{actual}</b>\n"
+                f"🎯 Dự đoán: <b>{pred}</b> ({conf}%)\n"
+                f"📢 Kết quả: {'✅ ĐÚNG' if is_correct else '❌ SAI'}")
+        except Exception as e:
+            print(f"[session_watcher] Lỗi gửi {uid}: {e}")
+        c.execute("UPDATE history SET actual=?, is_correct=?, notified=1 WHERE id=?",
+                  (actual, is_correct, r["id"]))
+        print(f"[session_watcher] Phiên #{session_id} → {actual} (pred={pred}, {'ĐÚNG' if is_correct else 'SAI'})")
+
+    conn.commit(); conn.close()
 
 # ================= API & THUẬT TOÁN =================
 def fetch_history():
@@ -235,9 +292,9 @@ def predict_from_hash(hash_str):
     return prediction, conf
 
 def rate_label(c):
-    if c < 60: return "Trung bình 🟡"
-    if c < 70: return "Cao 🟢"
-    return "Rất cao 🔥"
+    if c < 60: return ""
+    if c < 70: return ""
+    return ""
 
 # ================= MENUS =================
 def main_menu():
@@ -301,7 +358,7 @@ def cmd_start(message):
         f"📞 Admin: @{ADMIN_USERNAME}",
         reply_markup=main_menu())
 
-# ================= LAUCUA =================
+# ================= LAUCUA (CHỈ HIỆN PHIÊN + DỰ ĐOÁN + ĐỘ TIN CẬY) =================
 @bot.message_handler(commands=["laucua"])
 def cmd_laucua(message):
     ensure_user(message)
@@ -318,33 +375,34 @@ def do_laucua(chat_id, uid):
             f"Trạng thái: <b>{remain}</b>\n\n"
             f"💰 Gõ /nap để gia hạn key.")
         return
-    msg = bot.send_message(chat_id, "⏳ Đang phân tích MD5 + HASH 64...")
+    msg = bot.send_message(chat_id, "⏳ Đang phân tích...")
     data = fetch_history()
     if not data or not data.get("list"):
         bot.edit_message_text("❌ Không lấy được dữ liệu API.", chat_id, msg.message_id); return
+
     history = [x["resultTruyenThong"] for x in data["list"]]
     session_id = data["list"][0]["id"]
     prediction, conf = predict_md5(history)
+
+    # Lưu vào DB để session_watcher so sánh sau khi hết phiên
     conn = db(); c = conn.cursor()
-    c.execute("INSERT INTO history(user_id,prediction,confidence,created_at) VALUES(?,?,?,?)",
-              (uid, prediction, conf, datetime.now().isoformat()))
+    c.execute("""INSERT INTO history(user_id, session_id, prediction, confidence, created_at)
+                 VALUES(?,?,?,?,?)""",
+              (uid, session_id, prediction, conf, datetime.now().isoformat()))
     conn.commit(); conn.close()
+
     icon = "🔴" if prediction == "TAI" else "🔵"
-    last5 = " - ".join(history[:5])
     text = (
         f"🦀 <b>LE MINH TOOL — KẾT QUẢ</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"📊 Phiên: <b>#{session_id}</b>\n"
         f"{icon} Dự đoán: <b>{prediction}</b>\n"
         f"🎯 Độ tin cậy: <b>{conf}%</b> — {rate_label(conf)}\n"
-        f"📊 Thuật toán: MD5 + SHA256 (Hash-64)\n"
-        f"🕐 5 phiên gần: <code>{last5}</code>\n"
-        f"⏳ Key còn: <b>{remain}</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"⚠️ <i>Chỉ mang tính tham khảo.</i>"
+        f"⏳ Bot sẽ tự thông báo kết quả khi phiên kết thúc."
     )
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🔄 Lắc lại", callback_data="laucua"))
+    kb.add(types.InlineKeyboardButton("DỰ ĐOÁN", callback_data="laucua"))
     bot.edit_message_text(text, chat_id, msg.message_id, reply_markup=kb)
 
 # ================= NHẬP HASH =================
@@ -363,14 +421,11 @@ def handle_hash_input(message):
     prediction, conf = predict_from_hash(hash_str)
     icon = "🔴" if prediction == "TAI" else "🔵"
     text = (
-        f"🦀 <b>LE MINH TOOL </b>\n"
+        f"🦀 <b>LE MINH TOOL — DỰ ĐOÁN HASH</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"📥 Hash nhập: <code>{hash_str[:10]}...{hash_str[-10:]}</code>\n"
+        f"📥 Hash: <code>{hash_str[:10]}...{hash_str[-10:]}</code>\n"
         f"{icon} Dự đoán: <b>{prediction}</b>\n"
-        f"🎯 Độ tin cậy: <b>{conf}%</b> — {rate_label(conf)}\n"
-        f"📊 Thuật toán: DOCQUYENTHUATTOANMINHLE\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"💡 Cùng hash → cùng kết quả."
+        f"🎯 Độ tin cậy: <b>{conf}%</b> — {rate_label(conf)}"
     )
     bot.reply_to(message, text)
 
@@ -428,8 +483,7 @@ def cmd_key(message):
         f"✅ <b>KÍCH HOẠT THÀNH CÔNG</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"⏱ Thời lượng: <b>{k['hours']} giờ</b>\n"
-        f"📅 Hết hạn lúc: <b>{exp.strftime('%d/%m/%Y %H:%M:%S')}</b>\n"
-        f"💡 Key đếm theo thời gian thực — hết hạn là dừng.")
+        f"📅 Hết hạn lúc: <b>{exp.strftime('%d/%m/%Y %H:%M:%S')}</b>")
 
 # ================= ADMIN PANEL =================
 @bot.message_handler(commands=["admin"])
@@ -448,27 +502,18 @@ def on_admin_cb(call):
     uid = call.from_user.id
     if not is_admin_id(uid):
         bot.answer_callback_query(call.id, "❌ Không có quyền", show_alert=True); return
-
     act = call.data
     bot.answer_callback_query(call.id)
 
     if act == "adm_money":
         ADMIN_STATE[uid] = {"action": "money"}
-        bot.send_message(call.message.chat.id,
-            "💰 <b>CẤP TIỀN</b>\n"
-            "Cú pháp: <code>[user_id] [số_tiền]</code>\n"
-            "Ví dụ: <code>8852639183 50000</code>")
+        bot.send_message(call.message.chat.id, "💰 <b>CẤP TIỀN</b>\nCú pháp: <code>[user_id] [số_tiền]</code>")
     elif act == "adm_key":
         ADMIN_STATE[uid] = {"action": "key"}
-        bot.send_message(call.message.chat.id,
-            "🔑 <b>CẤP KEY</b>\n"
-            "Cú pháp: <code>[user_id] [số_giờ]</code>\n"
-            "Ví dụ: <code>8852639183 24</code>")
+        bot.send_message(call.message.chat.id, "🔑 <b>CẤP KEY</b>\nCú pháp: <code>[user_id] [số_giờ]</code>")
     elif act == "adm_check":
         ADMIN_STATE[uid] = {"action": "check"}
-        bot.send_message(call.message.chat.id,
-            "👤 <b>KIỂM USER</b>\n"
-            "Gửi <code>[user_id]</code> hoặc <code>@username</code>")
+        bot.send_message(call.message.chat.id, "👤 <b>KIỂM USER</b>\nGửi <code>[user_id]</code> hoặc <code>@username</code>")
     elif act == "adm_ban":
         ADMIN_STATE[uid] = {"action": "ban"}
         bot.send_message(call.message.chat.id, "🚫 <b>BAN USER</b>\nGửi <code>[user_id]</code> hoặc <code>@username</code>")
@@ -477,7 +522,7 @@ def on_admin_cb(call):
         bot.send_message(call.message.chat.id, "✅ <b>UNBAN USER</b>\nGửi <code>[user_id]</code> hoặc <code>@username</code>")
     elif act == "adm_list":
         conn = db(); c = conn.cursor()
-        c.execute("SELECT user_id, username, full_name, balance, key_expire, is_banned FROM users ORDER BY created_at DESC LIMIT 30")
+        c.execute("SELECT user_id, username, balance, key_expire, is_banned FROM users ORDER BY created_at DESC LIMIT 30")
         rows = c.fetchall(); conn.close()
         if not rows:
             bot.send_message(call.message.chat.id, "📭 Chưa có user nào."); return
@@ -490,17 +535,21 @@ def on_admin_cb(call):
         bot.send_message(call.message.chat.id, txt)
     elif act == "adm_genkey":
         ADMIN_STATE[uid] = {"action": "genkey"}
-        bot.send_message(call.message.chat.id, "🆕 <b>TẠO KEY HÀNG LOẠT</b>\nCú pháp: <code>[số_giờ] [số_lượng]</code>\nVí dụ: <code>24 10</code>")
+        bot.send_message(call.message.chat.id, "🆕 <b>TẠO KEY</b>\nCú pháp: <code>[số_giờ] [số_lượng]</code>")
     elif act == "adm_stats":
         conn = db(); c = conn.cursor()
-        c.execute("SELECT COUNT(*) as total FROM users"); total = c.fetchone()["total"]
-        c.execute("SELECT COUNT(*) as banned FROM users WHERE is_banned=1"); banned = c.fetchone()["banned"]
-        c.execute("SELECT COUNT(*) as keys FROM keys"); keys = c.fetchone()["keys"]
-        c.execute("SELECT COUNT(*) as used FROM keys WHERE used_count > 0"); used = c.fetchone()["used"]
-        c.execute("SELECT COUNT(*) as hist FROM history"); hist = c.fetchone()["hist"]
-        c.execute("SELECT COUNT(*) as active FROM users WHERE key_expire > ?", (datetime.now().isoformat(),))
-        active = c.fetchone()["active"]
+        c.execute("SELECT COUNT(*) as t FROM users"); total = c.fetchone()["t"]
+        c.execute("SELECT COUNT(*) as b FROM users WHERE is_banned=1"); banned = c.fetchone()["b"]
+        c.execute("SELECT COUNT(*) as k FROM keys"); keys = c.fetchone()["k"]
+        c.execute("SELECT COUNT(*) as u FROM keys WHERE used_count>0"); used = c.fetchone()["u"]
+        c.execute("SELECT COUNT(*) as h FROM history"); hist = c.fetchone()["h"]
+        c.execute("SELECT COUNT(*) as a FROM users WHERE key_expire > ?", (datetime.now().isoformat(),))
+        active = c.fetchone()["a"]
+        c.execute("SELECT COUNT(*) as c FROM history WHERE is_correct=1"); correct = c.fetchone()["c"]
+        c.execute("SELECT COUNT(*) as w FROM history WHERE is_correct=0"); wrong = c.fetchone()["w"]
         conn.close()
+        total_done = correct + wrong
+        rate = round(correct / total_done * 100, 1) if total_done > 0 else 0
         bot.send_message(call.message.chat.id,
             f"📊 <b>THỐNG KÊ HỆ THỐNG</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -509,7 +558,9 @@ def on_admin_cb(call):
             f"✅ Đang active: <b>{active}</b>\n"
             f"🔑 Tổng key: <b>{keys}</b>\n"
             f"📤 Key đã dùng: <b>{used}</b>\n"
-            f"📊 Lượt lắc cua: <b>{hist}</b>")
+            f"📊 Lượt lắc: <b>{hist}</b>\n"
+            f"✅ Đúng: <b>{correct}</b> | ❌ Sai: <b>{wrong}</b>\n"
+            f"🎯 Tỉ lệ đúng: <b>{rate}%</b>")
 
 @bot.message_handler(func=lambda m: m.from_user.id in ADMIN_STATE, content_types=["text"])
 def admin_input(message):
@@ -554,13 +605,20 @@ def admin_input(message):
             row = get_user(target)
             if not row: bot.reply_to(message, "❌ User chưa tồn tại."); return
             ok, remain, _ = key_status(row)
+            conn = db(); c = conn.cursor()
+            c.execute("SELECT COUNT(*) as t FROM history WHERE user_id=?", (target,)); total = c.fetchone()["t"]
+            c.execute("SELECT COUNT(*) as cc FROM history WHERE user_id=? AND is_correct=1", (target,)); correct = c.fetchone()["cc"]
+            c.execute("SELECT COUNT(*) as ww FROM history WHERE user_id=? AND is_correct=0", (target,)); wrong = c.fetchone()["ww"]
+            conn.close()
+            done = correct + wrong
+            rate = round(correct / done * 100, 1) if done > 0 else 0
             bot.reply_to(message,
                 f"👤 <b>THÔNG TIN USER</b>\n━━━━━━━━━━━━━━━━━━\n"
                 f"🆔 <code>{row['user_id']}</code>\n📛 Tên: {row['full_name']}\n"
                 f"📧 Username: @{row['username'] or '—'}\n💵 Số dư: <b>{row['balance']:,}đ</b>\n"
                 f"🔑 Key: {'✅ Còn <b>'+remain+'</b>' if ok else '🔒 '+remain}\n"
-                f"📅 Hết hạn: {row['key_expire'] or '—'}\n"
-                f"📶 Trạng thái: {'🔴 Banned' if row['is_banned'] else '🟢 OK'}")
+                f"📶 Trạng thái: {'🔴 Banned' if row['is_banned'] else '🟢 OK'}\n"
+                f"📊 Lượt lắc: <b>{total}</b> | ✅ {correct} | ❌ {wrong} ({rate}%)")
             ADMIN_STATE.pop(uid, None)
         elif act == "ban":
             target = resolve_target(text)
@@ -595,67 +653,6 @@ def admin_input(message):
         bot.reply_to(message, f"❌ Lỗi: <code>{e}</code>")
         ADMIN_STATE.pop(uid, None)
 
-# ================= LEGACY ADMIN COMMANDS =================
-@bot.message_handler(commands=["ban"])
-def cmd_ban(message):
-    if not is_admin(message): return
-    p = message.text.split()
-    if len(p) < 2: return
-    try: uid = int(p[1])
-    except: return
-    ban_user(uid)
-    bot.reply_to(message, f"✅ Đã ban <code>{uid}</code>")
-
-@bot.message_handler(commands=["unban"])
-def cmd_unban(message):
-    if not is_admin(message): return
-    p = message.text.split()
-    if len(p) < 2: return
-    unban_user(int(p[1]))
-    bot.reply_to(message, f"✅ Unban <code>{p[1]}</code>")
-
-@bot.message_handler(commands=["addmoney"])
-def cmd_addmoney(message):
-    if not is_admin(message): return
-    p = message.text.split()
-    if len(p) < 3: return
-    add_balance(int(p[1]), int(p[2]))
-    bot.reply_to(message, f"✅ +{int(p[2]):,}đ cho <code>{p[1]}</code>")
-
-@bot.message_handler(commands=["addkey"])
-def cmd_addkey(message):
-    if not is_admin(message): return
-    p = message.text.split()
-    if len(p) < 3: return
-    hours, qty = int(p[1]), int(p[2])
-    codes = []
-    conn = db(); c = conn.cursor()
-    for _ in range(qty):
-        code = gen_key_code()
-        c.execute("INSERT INTO keys(code,hours,created_at) VALUES(?,?,?)", (code, hours, datetime.now().isoformat()))
-        codes.append(code)
-    conn.commit(); conn.close()
-    bot.reply_to(message, "🔑 Keys mới:\n" + "\n".join(codes))
-
-@bot.message_handler(commands=["grantkey"])
-def cmd_grantkey(message):
-    if not is_admin(message): return
-    p = message.text.split()
-    if len(p) < 3: return
-    uid, hours = int(p[1]), int(p[2])
-    exp = grant_key(uid, hours)
-    bot.reply_to(message, f"✅ Cấp {hours}h cho <code>{uid}</code>\nHết hạn: {exp.strftime('%d/%m/%Y %H:%M')}")
-
-@bot.message_handler(commands=["checkkey"])
-def cmd_checkkey(message):
-    if not is_admin(message): return
-    p = message.text.split()
-    if len(p) < 2: return
-    uid = int(p[1]); row = get_user(uid)
-    if not row: bot.reply_to(message, "❌ User chưa tồn tại."); return
-    ok, remain, _ = key_status(row)
-    bot.reply_to(message, f"👤 <code>{uid}</code>\n🔑 {'Còn hạn' if ok else '🔒 '+remain}\n⏱ <b>{remain}</b>")
-
 # ================= USER CALLBACKS =================
 @bot.callback_query_handler(func=lambda c: True)
 def on_cb(call):
@@ -683,22 +680,39 @@ def on_cb(call):
         ok, remain, _ = key_status(row)
         bal = row["balance"] if row else 0
         status = "🔴 Banned" if (row and row["is_banned"]) else "🟢 Hoạt động"
+        conn = db(); c = conn.cursor()
+        c.execute("SELECT COUNT(*) as t FROM history WHERE user_id=?", (uid,)); total = c.fetchone()["t"]
+        c.execute("SELECT COUNT(*) as cc FROM history WHERE user_id=? AND is_correct=1", (uid,)); correct = c.fetchone()["cc"]
+        c.execute("SELECT COUNT(*) as ww FROM history WHERE user_id=? AND is_correct=0", (uid,)); wrong = c.fetchone()["ww"]
+        conn.close()
+        done = correct + wrong
+        rate = round(correct / done * 100, 1) if done > 0 else 0
         bot.edit_message_text(
             f"👤 <b>TÀI KHOẢN</b>\n━━━━━━━━━━━━━━━━━━\n"
             f"🆔 <code>{uid}</code>\n💵 Số dư: <b>{bal:,}đ</b>\n"
             f"🔑 Key: {'✅ Còn hạn <b>'+remain+'</b>' if ok else '🔒 '+remain}\n"
-            f"📶 {status}",
+            f"📶 {status}\n"
+            f"📊 Lượt lắc: <b>{total}</b> | ✅ {correct} | ❌ {wrong} ({rate}%)",
             call.message.chat.id, call.message.message_id, reply_markup=back_menu())
     elif data == "history":
         conn = db(); c = conn.cursor()
         c.execute("SELECT * FROM history WHERE user_id=? ORDER BY id DESC LIMIT 10", (uid,))
         rows = c.fetchall(); conn.close()
-        txt = "📭 Chưa có lịch sử." if not rows else "📊 <b>10 LẦN GẦN NHẤT</b>\n━━━━━━━━━━━━━━━━━━\n" + "".join([f"• {r['prediction']} — {r['confidence']}% ({r['created_at'][11:16]})\n" for r in rows])
+        if not rows:
+            txt = "📭 Chưa có lịch sử."
+        else:
+            txt = "📊 <b>10 LẦN GẦN NHẤT</b>\n━━━━━━━━━━━━━━━━━━\n"
+            for r in rows:
+                if r["actual"]:
+                    kq = "✅" if r["is_correct"] == 1 else "❌"
+                else:
+                    kq = "⏳"
+                txt += f"{kq} #{r['session_id']} — {r['prediction']} ({r['confidence']}%)\n"
         bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=back_menu())
 
 # ================= RUN =================
 if __name__ == "__main__":
-    t1 = threading.Thread(target=key_watcher, daemon=True)
-    t1.start()
+    threading.Thread(target=key_watcher, daemon=True).start()
+    threading.Thread(target=session_watcher, daemon=True).start()
     print(f"🦀 {BRAND} — Bot đang chạy...")
     bot.infinity_polling(timeout=30, long_polling_timeout=25)
