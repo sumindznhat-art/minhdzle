@@ -1,6 +1,5 @@
 import os
 import re
-import json
 import time
 import random
 import hashlib
@@ -10,9 +9,11 @@ import requests
 import telebot
 from telebot import types
 from datetime import datetime, timedelta
+from flask import Flask
 
 # ================= CONFIG =================
-TOKEN          = os.getenv("BOT_TOKEN", "8922811014:AAG0skxtzMPWNgM1ZpU8GWKKKaM-l-XDCBI")
+# Đã cập nhật token mới của bạn
+TOKEN          = os.getenv("BOT_TOKEN", "8862072402:AAGTRHUczvo9GvTOAejRAJjqR2oE-SKBIM0")
 ADMIN_USERNAME = "Minhlecutephomaique"
 API_URL        = "https://wtxmd52.tele68.com/v1/txmd5/sessions"
 PROXY          = "https://api.allorigins.win/raw?url="
@@ -21,6 +22,17 @@ BRAND          = "LE MINH TOOL — TOOL LÀM GIÀU KIẾM LÚA 🦀"
 CHECK_INTERVAL = 60
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
+
+# ================= FLASK WEB SERVER (FIX LỖI RENDER) =================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # ================= DATABASE =================
 def db():
@@ -382,11 +394,9 @@ def show_nap(chat_id):
     kb.add(types.InlineKeyboardButton("💬 Liên hệ Admin", url=f"https://t.me/{ADMIN_USERNAME}"))
     
     try:
-        # Gửi kèm ảnh và nội dung
         bot.send_photo(chat_id, IMAGE_URL, caption=text, reply_markup=kb, parse_mode="HTML")
     except Exception as e:
         print(f"Lỗi gửi ảnh: {e}")
-        # Fallback nếu ảnh lỗi
         bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
 
 @bot.message_handler(commands=["key"])
@@ -513,7 +523,13 @@ def on_cb(call):
 
 # ================= RUN =================
 if __name__ == "__main__":
-    t = threading.Thread(target=key_watcher, daemon=True)
-    t.start()
+    # Chạy Background watcher
+    t1 = threading.Thread(target=key_watcher, daemon=True)
+    t1.start()
+    
+    # Chạy Flask Web Server (giả lập port để Render không báo lỗi)
+    t2 = threading.Thread(target=run_flask, daemon=True)
+    t2.start()
+    
     print(f"🦀 {BRAND} — Bot đang chạy...")
     bot.infinity_polling(timeout=30, long_polling_timeout=25)
