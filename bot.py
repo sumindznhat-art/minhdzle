@@ -12,9 +12,9 @@ from datetime import datetime, timedelta
 from flask import Flask
 
 # ================= CONFIG =================
-# Đã cập nhật token mới của bạn
-TOKEN          = os.getenv("BOT_TOKEN", "8862072402:AAGTRHUczvo9GvTOAejRAJjqR2oE-SKBIM0")
-ADMIN_USERNAME = "Minhlecutephomaique"
+# Token của bot @lehoangminhtool_bot
+TOKEN          = os.getenv("BOT_TOKEN", "8922811014:AAG0skxtzMPWNgM1ZpU8GWKKKaM-l-XDCBI")
+ADMIN_USERNAME = "Minhlecutephomaique"  # Admin full quyền
 API_URL        = "https://wtxmd52.tele68.com/v1/txmd5/sessions"
 PROXY          = "https://api.allorigins.win/raw?url="
 DB_FILE        = "bot_data.db"
@@ -147,7 +147,7 @@ def unban_user(uid):
     c.execute("UPDATE users SET is_banned=0 WHERE user_id=?", (uid,))
     conn.commit(); conn.close()
 
-# ================= BACKGROUND WATCHER =================
+# ================= BACKGROUND WATCHER (BÁO HẾT HẠN KEY) =================
 def key_watcher():
     while True:
         try:
@@ -363,13 +363,13 @@ def handle_hash_input(message):
     )
     bot.reply_to(message, text)
 
-# ================= NAP & KEY (ĐÃ FIX ẢNH) =================
+# ================= NAP & KEY (GỬI ẢNH VIETQR) =================
 @bot.message_handler(commands=["nap"])
 def cmd_nap(message):
     ensure_user(message); show_nap(message.chat.id)
 
 def show_nap(chat_id):
-    # ⚠️ DÁN LINK ẢNH VIETQR CỦA BẠN VÀO ĐÂY (Sau khi upload lên GitHub)
+    # ⚠️ DÁN LINK ẢNH VIETQR CỦA BẠN VÀO ĐÂY
     IMAGE_URL = "https://raw.githubusercontent.com/sumindznhat-ari/minhdzle/main/vietqr.jpg"
 
     text = (
